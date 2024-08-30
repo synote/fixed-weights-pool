@@ -8,7 +8,7 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolModifyLiquidityTest} from "v4-core/src/test/PoolModifyLiquidityTest.sol";
 import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {PoolDonateTest} from "v4-core/src/test/PoolDonateTest.sol";
-import {Counter} from "../src/Counter.sol";
+import {Counter} from "../src/GeoMean.sol";
 import {HookMiner} from "../test/utils/HookMiner.sol";
 
 contract CounterScript is Script {
