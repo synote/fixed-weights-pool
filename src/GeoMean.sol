@@ -5,6 +5,7 @@ import {BaseHook} from "v4-periphery/src/base/hooks/BaseHook.sol";
 
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
+import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
@@ -18,6 +19,7 @@ contract Counter is BaseHook {
     using PoolIdLibrary for PoolKey;
     using CurrencySettler for Currency;
     using SafeCast for *;
+    using FullMath for *;
 
     error SwapNotImplemented();
 
@@ -31,6 +33,16 @@ contract Counter is BaseHook {
 
     mapping(PoolId => uint256 count) public beforeAddLiquidityCount;
     mapping(PoolId => uint256 count) public beforeRemoveLiquidityCount;
+
+    // Modify liquidity params for callback function
+    struct CallbackData {
+        PoolId id;
+        uint256 liquidityDelta;
+        Currency currency0;
+        Currency currency1;
+        address sender;
+    }
+
 
     // Fixed weights for pool reserve
     // The custom pool use defualt 50% : 50% ration for the poc project.
@@ -76,6 +88,68 @@ contract Counter is BaseHook {
         return (poolWeights[key].weightX, poolWeights[key].weightY);
     }
 
+    // Add liquidity directly for weighted pool
+    function addLiquidity(PoolKey calldata key, uint256 deltaL) external {
+        poolManager.unlock(
+            abi.encode(
+                CallbackData(
+                    key.toId(),
+                    deltaL,
+                    key.currency0,
+                    key.currency1,
+                    msg.sender
+                )
+            )
+        );
+    }
+
+    function _unlockCallback(
+        bytes calldata data
+    ) internal override returns (bytes memory) {
+        CallbackData memory callbackData = abi.decode(data, (CallbackData));
+        (uint256 amount0, uint256 amount1) = _getAmountfromDeltaL(
+            callbackData.liquidityDelta, poolWeights[callbackData.id]);
+
+        // settle liquidity from sender
+        callbackData.currency0.settle(
+            poolManager,
+            callbackData.sender,
+            amount0,
+            false
+        );
+        callbackData.currency1.settle(
+            poolManager,
+            callbackData.sender,
+            amount1,
+            false
+        );
+
+        // mint claim tokens for the hook
+        callbackData.currency0.take(
+            poolManager,
+            address(this),
+            amount0,
+            true
+        );
+        callbackData.currency1.take(
+            poolManager,
+            address(this),
+            amount1,
+            true
+        );
+
+        return "";
+    }
+
+    function _getAmountfromDeltaL(
+        uint256 liquidityDelta,
+        PoolParams memory pool
+        ) internal pure returns (uint256 deltaX, uint256 deltaY) {
+        uint256 totalLiquidity = WeightMath.calcInvariant(pool.reserveX, pool.reserveY, 0.5 ether, 0.5 ether);
+        deltaX = pool.reserveX.mulDiv(liquidityDelta, totalLiquidity);
+        deltaY = pool.reserveY.mulDiv(liquidityDelta, totalLiquidity);
+    }
+
     function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata params, bytes calldata)
         external
         override
@@ -95,7 +169,7 @@ contract Counter is BaseHook {
                 // exact output not implemented
                 revert SwapNotImplemented();
             }
-            // exact input
+            // exchange given exact input
             uint256 amountOut = WeightMath.calcAmountOut(
                 amountPositive,
                 wpool.reserveX,
@@ -131,7 +205,7 @@ contract Counter is BaseHook {
                 // exact output not implemented
                 revert SwapNotImplemented();
             }
-            // exact input
+            // exchange given exact input
             uint256 amountOut = WeightMath.calcAmountOut(
                 amountPositive,
                 wpool.reserveY,
@@ -139,7 +213,7 @@ contract Counter is BaseHook {
                 0.5 ether,
                 0.5 ether
             );
-            // state changed by swap
+            // pool reserve changed by swap
             wpool.reserveY += amountPositive;
             wpool.reserveX -= amountOut;
             // mint 6909 claim for hook
@@ -163,7 +237,6 @@ contract Counter is BaseHook {
             );
         }
 
-        // calcAmountOut
         beforeSwapCount[key.toId()]++;
         return (BaseHook.beforeSwap.selector, beforeSwapDelta, 0);
     }
