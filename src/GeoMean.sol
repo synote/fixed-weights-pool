@@ -46,7 +46,8 @@ contract WeightPool is BaseHook {
     }
 
 
-    // Fixed weights for pool reserve
+    // Fixed weights for pool reserve. the weightX weightY is
+    // no more than 1 ether which < 100%
     // The custom pool use defualt 50% : 50% ration for the poc project.
     struct PoolParams {
         uint64 weightX;
@@ -62,7 +63,7 @@ contract WeightPool is BaseHook {
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
-            afterInitialize: false,
+            afterInitialize: true,
             beforeAddLiquidity: true,
             afterAddLiquidity: false,
             beforeRemoveLiquidity: true,
@@ -82,7 +83,7 @@ contract WeightPool is BaseHook {
     // NOTE: see IHooks.sol for function documentation
     // -----------------------------------------------
 
-    function getPoolParams(PoolId key)
+    function getPoolWeights(PoolId key)
         public
         view
         returns (uint64, uint64)
@@ -166,7 +167,7 @@ contract WeightPool is BaseHook {
         uint256 liquidityDelta,
         PoolParams memory pool
         ) internal pure returns (uint256 deltaX, uint256 deltaY) {
-        uint256 totalLiquidity = WeightMath.calcInvariant(pool.reserveX, pool.reserveY, 0.5 ether, 0.5 ether);
+        uint256 totalLiquidity = WeightMath.calcInvariant(pool.reserveX, pool.reserveY, pool.weightX, pool.weightY);
         deltaX = pool.reserveX.mulDiv(liquidityDelta, totalLiquidity);
         deltaY = pool.reserveY.mulDiv(liquidityDelta, totalLiquidity);
     }
@@ -177,11 +178,24 @@ contract WeightPool is BaseHook {
         returns (uint256) {
         PoolParams memory pool = poolWeights[key.toId()];
         if (pool.reserveX > 0 && pool.reserveY > 0) {
-            return WeightMath.calcSpotPrice(pool.reserveX, pool.reserveY, 0.5 ether, 0.5 ether);
+            return WeightMath.calcSpotPrice(pool.reserveX, pool.reserveY, pool.weightX, pool.weightY);
         } else {
             // uninitialized pool reserves
             return 0;
         }
+    }
+
+    function afterInitialize(address, PoolKey calldata key, uint160, int24, bytes calldata)
+        external
+        override
+        returns (bytes4)
+    {
+        // The Fixed WeightPool should use the Initialize method to set
+        // pool price and reserve weights through hook data. The following
+        // code just set the weights to 50% : 50% for poc purpose.
+        poolWeights[key.toId()].weightX = 0.5 ether;
+        poolWeights[key.toId()].weightY = 0.5 ether;
+        return BaseHook.afterInitialize.selector;
     }
 
     function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata params, bytes calldata)
@@ -208,8 +222,8 @@ contract WeightPool is BaseHook {
                 amountPositive,
                 wpool.reserveX,
                 wpool.reserveY,
-                0.5 ether,
-                0.5 ether
+                wpool.weightX,
+                wpool.weightY
             );
 
             wpool.reserveX += amountPositive;
@@ -244,8 +258,8 @@ contract WeightPool is BaseHook {
                 amountPositive,
                 wpool.reserveY,
                 wpool.reserveX,
-                0.5 ether,
-                0.5 ether
+                wpool.weightX,
+                wpool.weightY
             );
             // pool reserve changed by swap
             wpool.reserveY += amountPositive;

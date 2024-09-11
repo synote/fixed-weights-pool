@@ -47,6 +47,7 @@ contract CounterTest is Test, Fixtures {
                     Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG |
                     Hooks.BEFORE_SWAP_FLAG |
                     Hooks.AFTER_SWAP_FLAG |
+                    Hooks.AFTER_INITIALIZE_FLAG |
                     Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
             )
         );
@@ -86,6 +87,13 @@ contract CounterTest is Test, Fixtures {
 
         // price ratio 1 ether
         console2.log("Inital spot price: ", hook.getSpotPrice(key));
+    }
+
+    function test_pool_weights() public {
+        (uint256 weightX, uint256 weightY) = hook.getPoolWeights(key.toId());
+
+        assertEq(weightX, 0.5 ether);
+        assertEq(weightY, 0.5 ether);
     }
 
     function test_swap_exactInput_zeroForOne() public {
