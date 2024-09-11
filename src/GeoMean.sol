@@ -15,7 +15,7 @@ import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDe
 import {CurrencySettler} from "v4-core/test/utils/CurrencySettler.sol";
 import {WeightMath} from "./WeightMath.sol";
 
-contract Counter is BaseHook {
+contract WeightPool is BaseHook {
     using PoolIdLibrary for PoolKey;
     using CurrencySettler for Currency;
     using SafeCast for *;
@@ -38,6 +38,8 @@ contract Counter is BaseHook {
     struct CallbackData {
         PoolId id;
         uint256 liquidityDelta;
+        uint256 maxDeltaX;
+        uint256 maxDeltaY;
         Currency currency0;
         Currency currency1;
         address sender;
@@ -89,12 +91,14 @@ contract Counter is BaseHook {
     }
 
     // Add liquidity directly for weighted pool
-    function addLiquidity(PoolKey calldata key, uint256 deltaL) external {
+    function addLiquidity(PoolKey calldata key, uint256 deltaL, uint256 maxDeltaX, uint256 maxDeltaY) external {
         poolManager.unlock(
             abi.encode(
                 CallbackData(
                     key.toId(),
                     deltaL,
+                    maxDeltaX,
+                    maxDeltaY,
                     key.currency0,
                     key.currency1,
                     msg.sender
@@ -106,9 +110,23 @@ contract Counter is BaseHook {
     function _unlockCallback(
         bytes calldata data
     ) internal override returns (bytes memory) {
+        uint256 amount0;
+        uint256 amount1;
         CallbackData memory callbackData = abi.decode(data, (CallbackData));
-        (uint256 amount0, uint256 amount1) = _getAmountfromDeltaL(
-            callbackData.liquidityDelta, poolWeights[callbackData.id]);
+
+        if (poolWeights[callbackData.id].reserveX > 0 && poolWeights[callbackData.id].reserveY > 0) {
+            (amount0, amount1) = _getAmountfromDeltaL(
+                callbackData.liquidityDelta,
+                poolWeights[callbackData.id]
+            );
+        } else {
+            // The pool liquidity is not initialized when zero reserve.
+            // Here we use max input amount as initial price and reserve.
+            // The pool should have a proper way to initialze the price
+            // when created at first time.
+            amount0 = callbackData.maxDeltaX;
+            amount1 = callbackData.maxDeltaY;
+        }
 
         // settle liquidity from sender
         callbackData.currency0.settle(
@@ -138,6 +156,9 @@ contract Counter is BaseHook {
             true
         );
 
+        poolWeights[callbackData.id].reserveX += amount0;
+        poolWeights[callbackData.id].reserveY += amount1;
+
         return "";
     }
 
@@ -148,6 +169,19 @@ contract Counter is BaseHook {
         uint256 totalLiquidity = WeightMath.calcInvariant(pool.reserveX, pool.reserveY, 0.5 ether, 0.5 ether);
         deltaX = pool.reserveX.mulDiv(liquidityDelta, totalLiquidity);
         deltaY = pool.reserveY.mulDiv(liquidityDelta, totalLiquidity);
+    }
+
+    function getSpotPrice(PoolKey calldata key)
+        public
+        view
+        returns (uint256) {
+        PoolParams memory pool = poolWeights[key.toId()];
+        if (pool.reserveX > 0 && pool.reserveY > 0) {
+            return WeightMath.calcSpotPrice(pool.reserveX, pool.reserveY, 0.5 ether, 0.5 ether);
+        } else {
+            // uninitialized pool reserves
+            return 0;
+        }
     }
 
     function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata params, bytes calldata)
