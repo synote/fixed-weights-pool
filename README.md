@@ -13,7 +13,7 @@ is 50% <-> 50% by each value no matter how the swap change each token's reserve.
 Given each reserves and weights, the liquidity can be solved by:
 
 ```
-(Rx**Wx) * (Ry**Wy) = L
+(Rx^Wx) * (Ry^Wy) = L
 ```
 
 The price of Token X respect to Token Y is defined:

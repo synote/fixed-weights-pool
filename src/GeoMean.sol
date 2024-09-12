@@ -12,10 +12,11 @@ import {Currency} from "v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
+import {ERC6909} from "v4-core/src/ERC6909.sol";
 import {CurrencySettler} from "v4-core/test/utils/CurrencySettler.sol";
 import {WeightMath} from "./WeightMath.sol";
 
-contract WeightPool is BaseHook {
+contract WeightPool is BaseHook, ERC6909 {
     using PoolIdLibrary for PoolKey;
     using CurrencySettler for Currency;
     using SafeCast for *;
@@ -37,7 +38,7 @@ contract WeightPool is BaseHook {
     // Modify liquidity params for callback function
     struct CallbackData {
         PoolId id;
-        uint256 liquidityDelta;
+        int256 liquidityDelta;
         uint256 maxDeltaX;
         uint256 maxDeltaY;
         Currency currency0;
@@ -49,14 +50,15 @@ contract WeightPool is BaseHook {
     // Fixed weights for pool reserve. the weightX weightY is
     // no more than 1 ether which < 100%
     // The custom pool use defualt 50% : 50% ration for the poc project.
-    struct PoolParams {
+    struct PoolReserve {
         uint64 weightX;
         uint64 weightY;
         uint256 reserveX;
         uint256 reserveY;
+        uint256 totalLiquidity;
     }
 
-    mapping(PoolId => PoolParams) public poolWeights;
+    mapping(PoolId => PoolReserve) public poolWeights;
 
     constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
 
@@ -91,13 +93,13 @@ contract WeightPool is BaseHook {
         return (poolWeights[key].weightX, poolWeights[key].weightY);
     }
 
-    // Add liquidity directly for weighted pool
+    // Add liquidity directly for fixed weight pool
     function addLiquidity(PoolKey calldata key, uint256 deltaL, uint256 maxDeltaX, uint256 maxDeltaY) external {
         poolManager.unlock(
             abi.encode(
                 CallbackData(
                     key.toId(),
-                    deltaL,
+                    int256(deltaL),
                     maxDeltaX,
                     maxDeltaY,
                     key.currency0,
@@ -113,13 +115,15 @@ contract WeightPool is BaseHook {
     ) internal override returns (bytes memory) {
         uint256 amount0;
         uint256 amount1;
+        int256 deltaL;
         CallbackData memory callbackData = abi.decode(data, (CallbackData));
 
         if (poolWeights[callbackData.id].reserveX > 0 && poolWeights[callbackData.id].reserveY > 0) {
             (amount0, amount1) = _getAmountfromDeltaL(
-                callbackData.liquidityDelta,
+                uint256(callbackData.liquidityDelta),
                 poolWeights[callbackData.id]
             );
+            deltaL = callbackData.liquidityDelta;
         } else {
             // The pool liquidity is not initialized when zero reserve.
             // Here we use max input amount as initial price and reserve.
@@ -127,6 +131,12 @@ contract WeightPool is BaseHook {
             // when created at first time.
             amount0 = callbackData.maxDeltaX;
             amount1 = callbackData.maxDeltaY;
+            deltaL = int256(WeightMath.calcInvariant(
+                amount0,
+                amount1,
+                poolWeights[callbackData.id].weightX,
+                poolWeights[callbackData.id].weightY
+            ));
         }
 
         // settle liquidity from sender
@@ -159,13 +169,95 @@ contract WeightPool is BaseHook {
 
         poolWeights[callbackData.id].reserveX += amount0;
         poolWeights[callbackData.id].reserveY += amount1;
+        poolWeights[callbackData.id].totalLiquidity += uint256(deltaL);
+        _mintShare(callbackData.sender, callbackData.id, uint256(deltaL));
 
         return "";
     }
 
+    function _increaseLiquidity(
+        CallbackData calldata params,
+        uint256 amount0,
+        uint256 amount1,
+        int256 deltaL
+        ) internal {
+        // settle liquidity from sender
+        params.currency0.settle(
+            poolManager,
+            params.sender,
+            amount0,
+            false
+        );
+        params.currency1.settle(
+            poolManager,
+            params.sender,
+            amount1,
+            false
+        );
+
+        // mint claim tokens for the hook
+        params.currency0.take(
+            poolManager,
+            address(this),
+            amount0,
+            true
+        );
+        params.currency1.take(
+            poolManager,
+            address(this),
+            amount1,
+            true
+        );
+
+        poolWeights[params.id].reserveX += amount0;
+        poolWeights[params.id].reserveY += amount1;
+        poolWeights[params.id].totalLiquidity += uint256(deltaL);
+        _mintShare(params.sender, params.id, uint256(deltaL));
+    }
+
+    function _decreaseLiquidity(
+        CallbackData calldata params,
+        uint256 amount0,
+        uint256 amount1,
+        int256 deltaL
+        ) internal {
+        // burn claim tokens for the hook
+        params.currency0.settle(
+            poolManager,
+            address(this),
+            amount0,
+            true
+        );
+        params.currency1.settle(
+            poolManager,
+            address(this),
+            amount1,
+            true
+        );
+
+        // receive currency from manager
+        params.currency0.take(
+            poolManager,
+            params.sender,
+            amount0,
+            false
+        );
+        params.currency1.take(
+            poolManager,
+            params.sender,
+            amount1,
+            false
+        );
+
+        poolWeights[params.id].reserveX -= amount0;
+        poolWeights[params.id].reserveY -= amount1;
+        poolWeights[params.id].totalLiquidity -= uint256(-deltaL);
+        _burnShare(params.sender, params.id, uint256(-deltaL));
+    }
+
     function _getAmountfromDeltaL(
         uint256 liquidityDelta,
-        PoolParams memory pool
+        PoolReserve memory pool
         ) internal pure returns (uint256 deltaX, uint256 deltaY) {
         uint256 totalLiquidity = WeightMath.calcInvariant(pool.reserveX, pool.reserveY, pool.weightX, pool.weightY);
         deltaX = pool.reserveX.mulDiv(liquidityDelta, totalLiquidity);
@@ -176,7 +268,7 @@ contract WeightPool is BaseHook {
         public
         view
         returns (uint256) {
-        PoolParams memory pool = poolWeights[key.toId()];
+        PoolReserve memory pool = poolWeights[key.toId()];
         if (pool.reserveX > 0 && pool.reserveY > 0) {
             return WeightMath.calcSpotPrice(pool.reserveX, pool.reserveY, pool.weightX, pool.weightY);
         } else {
@@ -208,7 +300,7 @@ contract WeightPool is BaseHook {
             ? uint256(params.amountSpecified)
             : uint256(-params.amountSpecified);
 
-        PoolParams memory wpool = poolWeights[key.toId()];
+        PoolReserve memory wpool = poolWeights[key.toId()];
         BeforeSwapDelta beforeSwapDelta;
 
         // settle balance to hook
@@ -316,5 +408,15 @@ contract WeightPool is BaseHook {
     ) external override returns (bytes4) {
         beforeRemoveLiquidityCount[key.toId()]++;
         return BaseHook.beforeRemoveLiquidity.selector;
+    }
+
+    // mint LP token share for address lp
+    function _mintShare(address lp, PoolId poolId, uint256 amount) internal {
+        _mint(lp, uint256(PoolId.unwrap(poolId)), amount);
+    }
+
+    // burn LP token share for address lp
+    function _burnShare(address lp, PoolId poolId, uint256 amount) internal {
+        _burn(lp, uint256(PoolId.unwrap(poolId)), amount);
     }
 }

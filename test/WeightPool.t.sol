@@ -89,7 +89,7 @@ contract CounterTest is Test, Fixtures {
         console2.log("Inital spot price: ", hook.getSpotPrice(key));
     }
 
-    function test_pool_weights() public {
+    function test_pool_weights() public view {
         (uint256 weightX, uint256 weightY) = hook.getPoolWeights(key.toId());
 
         assertEq(weightX, 0.5 ether);
