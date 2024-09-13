@@ -23,17 +23,12 @@ contract WeightPool is BaseHook, ERC6909 {
     using FullMath for *;
 
     error SwapNotImplemented();
+    error ModifyLiquidityNotAllowed();
 
     // NOTE: ---------------------------------------------------------
     // state variables should typically be unique to a pool
     // a single hook contract should be able to service multiple pools
     // ---------------------------------------------------------------
-
-    mapping(PoolId => uint256 count) public beforeSwapCount;
-    mapping(PoolId => uint256 count) public afterSwapCount;
-
-    mapping(PoolId => uint256 count) public beforeAddLiquidityCount;
-    mapping(PoolId => uint256 count) public beforeRemoveLiquidityCount;
 
     // Modify liquidity params for callback function
     struct CallbackData {
@@ -49,7 +44,7 @@ contract WeightPool is BaseHook, ERC6909 {
 
     // Fixed weights for pool reserve. the weightX weightY is
     // no more than 1 ether which < 100%
-    // The custom pool use defualt 50% : 50% ration for the poc project.
+    // The custom pool use defualt 50% : 50% ratio for the poc project.
     struct PoolReserve {
         uint64 weightX;
         uint64 weightY;
@@ -93,7 +88,11 @@ contract WeightPool is BaseHook, ERC6909 {
         return (poolWeights[key].weightX, poolWeights[key].weightY);
     }
 
-    // Add liquidity directly for fixed weight pool
+    /// @notice Add liquidity directly for fixed weight pool
+    /// @param key pool key of the LP pool
+    /// @param deltaL Liquidity delta added for the pool
+    /// @param maxDeltaX Max currency 0 added for reserve x
+    /// @param maxDeltaY Max currency 1 added for reserve y
     function addLiquidity(PoolKey calldata key, uint256 deltaL, uint256 maxDeltaX, uint256 maxDeltaY) external {
         poolManager.unlock(
             abi.encode(
@@ -110,73 +109,73 @@ contract WeightPool is BaseHook, ERC6909 {
         );
     }
 
+    /// @notice Remove liquidity directly for fixed weight pool
+    /// @param key pool key of the LP pool
+    /// @param deltaL Liquidity delta to remove from the pool
+    /// @param maxDeltaX Max currency 0 to remove for reserve x
+    /// @param maxDeltaY Max currency 1 to remove for reserve y
+    function removeLiquidity(PoolKey calldata key, uint256 deltaL, uint256 maxDeltaX, uint256 maxDeltaY) external {
+        poolManager.unlock(
+            abi.encode(
+                CallbackData(
+                    key.toId(),
+                    -int256(deltaL),
+                    maxDeltaX,
+                    maxDeltaY,
+                    key.currency0,
+                    key.currency1,
+                    msg.sender
+                )
+            )
+        );
+    }
+
     function _unlockCallback(
         bytes calldata data
     ) internal override returns (bytes memory) {
         uint256 amount0;
         uint256 amount1;
         int256 deltaL;
-        CallbackData memory callbackData = abi.decode(data, (CallbackData));
 
-        if (poolWeights[callbackData.id].reserveX > 0 && poolWeights[callbackData.id].reserveY > 0) {
+        CallbackData memory callbackData = abi.decode(data, (CallbackData));
+        if (callbackData.liquidityDelta > 0) {
+            // Add liquidity
+            if (poolWeights[callbackData.id].reserveX > 0 && poolWeights[callbackData.id].reserveY > 0) {
+                (amount0, amount1) = _getAmountfromDeltaL(
+                    uint256(callbackData.liquidityDelta),
+                    poolWeights[callbackData.id]
+                );
+                deltaL = callbackData.liquidityDelta;
+            } else {
+                // The pool liquidity is not initialized when zero reserve.
+                // Here we use max input amount as initial price and reserve.
+                // The pool should have a proper way to initialze the price
+                // when created at first time.
+                amount0 = callbackData.maxDeltaX;
+                amount1 = callbackData.maxDeltaY;
+                deltaL = int256(WeightMath.calcInvariant(
+                    amount0,
+                    amount1,
+                    poolWeights[callbackData.id].weightX,
+                    poolWeights[callbackData.id].weightY
+                ));
+            }
+            _increaseLiquidity(callbackData, amount0, amount1, deltaL);
+
+        } else {
+            // Remove liquidity
             (amount0, amount1) = _getAmountfromDeltaL(
-                uint256(callbackData.liquidityDelta),
+                uint256(-callbackData.liquidityDelta),
                 poolWeights[callbackData.id]
             );
-            deltaL = callbackData.liquidityDelta;
-        } else {
-            // The pool liquidity is not initialized when zero reserve.
-            // Here we use max input amount as initial price and reserve.
-            // The pool should have a proper way to initialze the price
-            // when created at first time.
-            amount0 = callbackData.maxDeltaX;
-            amount1 = callbackData.maxDeltaY;
-            deltaL = int256(WeightMath.calcInvariant(
-                amount0,
-                amount1,
-                poolWeights[callbackData.id].weightX,
-                poolWeights[callbackData.id].weightY
-            ));
+            _decreaseLiquidity(callbackData, amount0, amount1, callbackData.liquidityDelta);
         }
-
-        // settle liquidity from sender
-        callbackData.currency0.settle(
-            poolManager,
-            callbackData.sender,
-            amount0,
-            false
-        );
-        callbackData.currency1.settle(
-            poolManager,
-            callbackData.sender,
-            amount1,
-            false
-        );
-
-        // mint claim tokens for the hook
-        callbackData.currency0.take(
-            poolManager,
-            address(this),
-            amount0,
-            true
-        );
-        callbackData.currency1.take(
-            poolManager,
-            address(this),
-            amount1,
-            true
-        );
-
-        poolWeights[callbackData.id].reserveX += amount0;
-        poolWeights[callbackData.id].reserveY += amount1;
-        poolWeights[callbackData.id].totalLiquidity += uint256(deltaL);
-        _mintShare(callbackData.sender, callbackData.id, uint256(deltaL));
 
         return "";
     }
 
     function _increaseLiquidity(
-        CallbackData calldata params,
+        CallbackData memory params,
         uint256 amount0,
         uint256 amount1,
         int256 deltaL
@@ -216,7 +215,7 @@ contract WeightPool is BaseHook, ERC6909 {
     }
 
     function _decreaseLiquidity(
-        CallbackData calldata params,
+        CallbackData memory params,
         uint256 amount0,
         uint256 amount1,
         int256 deltaL
@@ -255,6 +254,7 @@ contract WeightPool is BaseHook, ERC6909 {
         _burnShare(params.sender, params.id, uint256(-deltaL));
     }
 
+    // Calculate the amount0 amout1 changed when given Liquidity delta
     function _getAmountfromDeltaL(
         uint256 liquidityDelta,
         PoolReserve memory pool
@@ -264,6 +264,8 @@ contract WeightPool is BaseHook, ERC6909 {
         deltaY = pool.reserveY.mulDiv(liquidityDelta, totalLiquidity);
     }
 
+    // Calculate price based on weight and reserve, The Price is not directly
+    // equal to reserve ratio.
     function getSpotPrice(PoolKey calldata key)
         public
         view
@@ -277,14 +279,14 @@ contract WeightPool is BaseHook, ERC6909 {
         }
     }
 
+    // The Fixed WeightPool should use the Initialize method to set
+    // pool price and reserve weights through hook data. The following
+    // code just set the weights to 50% : 50% for poc purpose.
     function afterInitialize(address, PoolKey calldata key, uint160, int24, bytes calldata)
         external
         override
         returns (bytes4)
     {
-        // The Fixed WeightPool should use the Initialize method to set
-        // pool price and reserve weights through hook data. The following
-        // code just set the weights to 50% : 50% for poc purpose.
         poolWeights[key.toId()].weightX = 0.5 ether;
         poolWeights[key.toId()].weightY = 0.5 ether;
         return BaseHook.afterInitialize.selector;
@@ -377,37 +379,34 @@ contract WeightPool is BaseHook, ERC6909 {
             );
         }
 
-        beforeSwapCount[key.toId()]++;
         return (BaseHook.beforeSwap.selector, beforeSwapDelta, 0);
     }
 
-    function afterSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, BalanceDelta, bytes calldata)
+    function afterSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata, BalanceDelta, bytes calldata)
         external
+        pure
         override
         returns (bytes4, int128)
     {
-        afterSwapCount[key.toId()]++;
         return (BaseHook.afterSwap.selector, 0);
     }
 
     function beforeAddLiquidity(
         address,
-        PoolKey calldata key,
+        PoolKey calldata,
         IPoolManager.ModifyLiquidityParams calldata,
         bytes calldata
-    ) external override returns (bytes4) {
-        beforeAddLiquidityCount[key.toId()]++;
-        return BaseHook.beforeAddLiquidity.selector;
+    ) external pure override returns (bytes4) {
+        revert ModifyLiquidityNotAllowed();
     }
 
     function beforeRemoveLiquidity(
         address,
-        PoolKey calldata key,
+        PoolKey calldata,
         IPoolManager.ModifyLiquidityParams calldata,
         bytes calldata
-    ) external override returns (bytes4) {
-        beforeRemoveLiquidityCount[key.toId()]++;
-        return BaseHook.beforeRemoveLiquidity.selector;
+    ) external pure override returns (bytes4) {
+        revert ModifyLiquidityNotAllowed();
     }
 
     // mint LP token share for address lp
