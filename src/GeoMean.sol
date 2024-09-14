@@ -25,6 +25,24 @@ contract WeightPool is BaseHook, ERC6909 {
     error SwapNotImplemented();
     error ModifyLiquidityNotAllowed();
 
+    /// @notice Emitted when a liquidity delta is applied
+    /// @param id The abi encoded hash of the pool key struct for the pool that was modified
+    /// @param sender The address that modified the pool
+    /// @param liquidityDelta The amount of liquidity that was added or removed
+    event ModifyLiquidity(
+        PoolId indexed id, address indexed sender, int256 liquidityDelta
+    );
+
+    /// @notice Emitted for swaps between currency0 and currency1
+    /// @param id The abi encoded hash of the pool key struct for the pool that was modified
+    /// @param sender The address that initiated the swap call, and that received the callback
+    /// @param amount0 The delta of the currency0 balance of the pool
+    /// @param amount1 The delta of the currency1 balance of the pool
+    /// @param liquidity The liquidity of the pool after the swap
+    event Swap(
+        PoolId indexed id, address indexed sender, int128 amount0, int128 amount1, uint256 liquidity
+    );
+
     // NOTE: ---------------------------------------------------------
     // state variables should typically be unique to a pool
     // a single hook contract should be able to service multiple pools
@@ -212,6 +230,8 @@ contract WeightPool is BaseHook, ERC6909 {
         poolWeights[params.id].reserveY += amount1;
         poolWeights[params.id].totalLiquidity += uint256(deltaL);
         _mintShare(params.sender, params.id, uint256(deltaL));
+
+        emit ModifyLiquidity(params.id, params.sender, deltaL);
     }
 
     function _decreaseLiquidity(
@@ -252,6 +272,8 @@ contract WeightPool is BaseHook, ERC6909 {
         poolWeights[params.id].reserveY -= amount1;
         poolWeights[params.id].totalLiquidity -= uint256(-deltaL);
         _burnShare(params.sender, params.id, uint256(-deltaL));
+
+        emit ModifyLiquidity(params.id, params.sender, deltaL);
     }
 
     // Calculate the amount0 amout1 changed when given Liquidity delta
@@ -292,7 +314,7 @@ contract WeightPool is BaseHook, ERC6909 {
         return BaseHook.afterInitialize.selector;
     }
 
-    function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata params, bytes calldata)
+    function beforeSwap(address sender, PoolKey calldata key, IPoolManager.SwapParams calldata params, bytes calldata)
         external
         override
         returns (bytes4, BeforeSwapDelta, uint24)
@@ -338,6 +360,8 @@ contract WeightPool is BaseHook, ERC6909 {
                 true
             );
 
+            emit Swap(key.toId(), sender, amountPositive.toInt128(), -amountOut.toInt128(), wpool.totalLiquidity);
+
             beforeSwapDelta = toBeforeSwapDelta(
                 int128(-params.amountSpecified),
                 -amountOut.toInt128()
@@ -372,6 +396,8 @@ contract WeightPool is BaseHook, ERC6909 {
                 amountOut,
                 true
             );
+
+            emit Swap(key.toId(), sender, -amountOut.toInt128(), amountPositive.toInt128(), wpool.totalLiquidity);
 
             beforeSwapDelta = toBeforeSwapDelta(
                 int128(-params.amountSpecified),
